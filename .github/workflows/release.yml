@@ -13,7 +13,7 @@ jobs:
       version: ${{ env.RELEASE_VERSION }}
     steps:
       - name: Parse refs
-      - run: |
+        run: |
           RELEASE_TAG=${GITHUB_REF#refs/*/}
           test -z $RELEASE_TAG && exit 1
           RELEASE_VERSION=$(echo "$RELEASE_TAG" | sed 's/^[^0-9]*//')
