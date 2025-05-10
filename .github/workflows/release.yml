@@ -1,100 +1,72 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  release:
+    types: [published]
 
 jobs:
-  create-release:
-    name: Create Draft Release
+  extract-tag:
+    name: Extract release tag
     runs-on: ubuntu-latest
     outputs:
-      pkg_version: ${{ env.PKG_VERSION }}
-      pkg_tag: ${{ env.PKG_TAG }}
+      tag: ${{ env.RELEASE_TAG }}
+      version: ${{ env.RELEASE_VERSION }}
     steps:
-      - name: Get release version
+      - name: Parse refs
         run: |
-          TEMP_TAG=${GITHUB_REF#refs/*/}
-          test -z $TEMP_TAG && exit 1
-          TEMP_VERSION=$(echo "$TEMP_TAG" | sed 's/^[^0-9]*//')
-          test -z $TEMP_VERSION && exit 1
-          echo "Releasing version: $TEMP_VERSION; Tag: $TEMP_TAG"
-          echo "PKG_VERSION=$TEMP_VERSION" >> $GITHUB_ENV
-          echo "PKG_TAG=$TEMP_TAG" >> $GITHUB_ENV
+          RELEASE_TAG=${GITHUB_REF#refs/*/}
+          test -z $RELEASE_TAG && exit 1
+          RELEASE_VERSION=$(echo "$RELEASE_TAG" | sed 's/^[^0-9]*//')
+          test -z $RELEASE_VERSION && exit 1
+          echo "Releasing version: $RELEASE_VERSION; Tag: $RELEASE_TAG"
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> $GITHUB_ENV
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
 
-      - name: git checkout
-        uses: actions/checkout@v4
-
-      - name: Build Changelog
-        id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v5
-        with:
-          configuration: ".github/changelog-configuration.json"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create Draft GitHub release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.PKG_TAG }}
-          draft: true
-          prerelease: false
-          body: ${{steps.build_changelog.outputs.changelog}}
-
-  build-release:
-    needs: ["create-release"]
-    runs-on: ubuntu-latest
-    container: gcc:11.5.0-bullseye
-    env:
-      LC_CTYPE: C.UTF-8
-      CMAKE_COLOR_DIAGNOSTICS: ON
-      DEBIAN_FRONTEND: noninteractive
+  build:
+    name: Build
+    runs-on: ubuntu-22.04
+    needs: ["extract-tag"]
     steps:
       - name: git checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: apt update && apt install -y cmake pkg-config libogg-dev libogg0
+        run: sudo apt update && sudo apt install -y g++ cmake pkg-config libogg-dev libogg0
 
-      - name: Build debian binary
-        env:
-          CXX: g++
-          CXXFLAGS: -DCMAKE_BUILD_TYPE=Release -D_FORTIFY_SOURCE=3 -D_GLIBCXX_ASSERTIONS -O2 -flto=auto -Wall -Wextra -Werror -fstack-protector-strong -fstack-clash-protection -fcf-protection
+      - name: CMake build
         run: |
-          cmake -B target -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON
-          cmake --build target
-
-      - name: Generate .deb package file
-        env:
-          CONTROL_FILE: debian/DEBIAN/control
+          mkdir build
+          cmake -DCMAKE_INSTALL_PREFIX=./build/usr -S .
+          make
+          make install
+      
+      - name: Create control file
         run: |
-          mkdir -p debian/usr/bin
-          mkdir -p debian/DEBIAN
-          cp target/opustags debian/usr/bin/
-          chmod 775 debian/usr/bin/opustags
-          echo "Package: opustags" >> ${CONTROL_FILE}
-          echo "Architecture: amd64" >> ${CONTROL_FILE}
-          echo "Maintainer: github.com/fmang" >> ${CONTROL_FILE}
-          echo "Version: ${{ needs.create-release.outputs.pkg_version }}" >> ${CONTROL_FILE}
-          echo "Depends: libogg0 (>= 1.3.4) | libogg (>= 1.3.4)" >> ${CONTROL_FILE}
-          echo "Priority: optional" >> ${CONTROL_FILE}
-          echo "Description: Ogg Opus tags editor " >> ${CONTROL_FILE}
-          dpkg-deb -v --build debian
-          mv debian.deb opustags-${{ needs.create-release.outputs.pkg_version }}-amd64.deb
+          mkdir -p build/DEBIAN
+          cat << EOF > build/DEBIAN/control
+          Package: opustags
+          Version: ${{ needs.extract-tag.outputs.version }}
+          Architecture: amd64
+          Maintainer: github.com/fmang
+          Depends: libogg0 (>= 1.3.4) | libogg (>= 1.3.4)
+          Priority: optional
+          Description: Ogg Opus tags editor
+          EOF
+      
+      - name: Create package file
+        run: |
+          dpkg-deb -v --build ./build
+          mv build.deb opustags-${{ needs.extract-tag.outputs.version }}-amd64.deb
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: debian-pkg
-          path: opustags-${{ needs.create-release.outputs.pkg_version }}-amd64.deb
+          path: opustags-${{ needs.extract-tag.outputs.version }}-amd64.deb
 
   upload-assets:
     name: Upload release assets
-    needs: ["create-release", "build-release"]
+    needs: ["extract-tag", "build"]
     runs-on: ubuntu-latest
     steps:
       - name: Download all workflow run artifacts
@@ -105,18 +77,7 @@ jobs:
 
       - name: Upload .deb package file
         run: |
-          gh release upload "${{ needs.create-release.outputs.pkg_tag }}" "opustags-${{ needs.create-release.outputs.pkg_version }}-amd64.deb"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-
-  publish-release:
-    name: Publish Release
-    needs: ["create-release", "build-release", "upload-assets"]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish Release
-        run: gh release edit "${{ needs.create-release.outputs.pkg_tag }}" --draft=false
+          gh release upload ${{ needs.extract-tag.outputs.tag }} opustags-${{ needs.extract-tag.outputs.version }}-amd64.deb
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
